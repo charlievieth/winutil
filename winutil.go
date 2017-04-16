@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -66,18 +67,14 @@ type ntPROCESS_BASIC_INFORMATION struct {
 	Reserved3       uintptr    // InheritedFromUniqueProcessId
 }
 
-const (
-	PROCESS_QUERY_INFORMATION = 0x00000400
-	PROCESS_VM_READ           = 0x0010
-)
-
 // ParentPID returns the parent pid of pid.
 //
 // https://msdn.microsoft.com/en-us/library/windows/desktop/ms684280(v=vs.85).aspx
 func ParentPID(pid uint32) (uint32, error) {
 	const (
 		ProcessBasicInformation = 0
-		da                      = PROCESS_QUERY_INFORMATION | PROCESS_VM_READ
+		PROCESS_VM_READ         = 0x0010
+		da                      = syscall.PROCESS_QUERY_INFORMATION | PROCESS_VM_READ
 	)
 	if pid == 0 {
 		return 0, nil
@@ -89,7 +86,6 @@ func ParentPID(pid uint32) (uint32, error) {
 		}
 		return 0, err
 	}
-
 	var pbi ntPROCESS_BASIC_INFORMATION
 	var length uint32
 	r1, _, e1 := syscall.Syscall6(procNtQueryInformationProcess.Addr(), 5,
@@ -136,7 +132,7 @@ func parentProcesses() (parentChild map[uint32][]uint32, first error) {
 }
 
 // appendChildren, appends the child pids of parent pid to slice a.
-func appendChildren(a []uint32, parent uint32, m map[uint32][]uint32) []uint32 {
+func appendChildren(a []uint32, parent uint32, m map[uint32][]uint32) ([]uint32, error) {
 	const MaxPids = 1048576 // 0x100000
 	stack := []uint32{parent}
 
@@ -163,10 +159,19 @@ func appendChildren(a []uint32, parent uint32, m map[uint32][]uint32) []uint32 {
 		}
 	}
 	if len(a) >= MaxPids {
-		panic("appendChildren: too many pids - cyclical loop is likely cause")
+		return nil, errors.New("appendChildren: too many pids - cyclical loop is likely cause")
 	}
+	return a, nil
+}
 
-	return a
+// ChildPids returns the child pids of parent ppid, including ppid.
+func ChildPids(ppid uint32) ([]uint32, error) {
+	// ignore error - likely Access is Denied
+	m, err := parentProcesses()
+	if err != nil && len(m) == 0 {
+		return nil, err
+	}
+	return appendChildren([]uint32{ppid}, ppid, m)
 }
 
 func terminateProcess(pid, exitcode uint32) error {
@@ -183,9 +188,7 @@ func terminateProcess(pid, exitcode uint32) error {
 // order: parent -> child -> grandchild -> etc...
 //
 // Note: child pids created while this running will be missed.
-func RecursiveKill(parent int) (first error) {
-	ppid := uint32(parent)
-
+func RecursiveKill(ppid uint32) (first error) {
 	// make sure we can kill the parent
 	p, err := syscall.OpenProcess(syscall.PROCESS_TERMINATE, false, ppid)
 	if err != nil {
@@ -193,11 +196,18 @@ func RecursiveKill(parent int) (first error) {
 	}
 	syscall.CloseHandle(p)
 
+	// ignore error if some processes are returned
 	m, err := parentProcesses()
 	if err != nil && len(m) == 0 {
 		return err
 	}
-	pids := appendChildren([]uint32{ppid}, ppid, m)
+
+	// don't ignore this error
+	pids, err := appendChildren([]uint32{ppid}, ppid, m)
+	if err != nil {
+		return err
+	}
+
 	for _, child := range pids {
 		err := terminateProcess(child, 1)
 		if err != nil && first == nil {
@@ -219,7 +229,7 @@ func main() {
 	}
 
 	t := time.Now()
-	err = RecursiveKill(parent)
+	err = RecursiveKill(uint32(parent))
 	d := time.Since(t)
 
 	fmt.Println(d)
