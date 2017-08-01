@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"syscall"
 	"time"
 	"unicode/utf16"
@@ -26,20 +25,27 @@ var (
 
 	procK32EnumProcesses          = kernel32.MustFindProc("K32EnumProcesses")
 	procQueryFullProcessImageName = kernel32.MustFindProc("QueryFullProcessImageNameW")
+	procGetSystemTimes            = kernel32.MustFindProc("GetSystemTimes")
 
 	procGetProcessImageFileName   = psapi.MustFindProc("GetProcessImageFileNameW")
 	procNtQueryInformationProcess = ntdll.MustFindProc("NtQueryInformationProcess")
 	procNtQuerySystemInformation  = ntdll.MustFindProc("NtQuerySystemInformation")
 )
 
-/*
-NTSTATUS WINAPI NtQuerySystemInformation(
-  _In_      SYSTEM_INFORMATION_CLASS SystemInformationClass,
-  _Inout_   PVOID                    SystemInformation,
-  _In_      ULONG                    SystemInformationLength,
-  _Out_opt_ PULONG                   ReturnLength
-);
-*/
+func GetSystemTimes(Idle, Kernel, User *windows.Filetime) error {
+	r1, _, e1 := syscall.Syscall(procGetSystemTimes.Addr(), 3,
+		uintptr(unsafe.Pointer(Idle)),   // LPFILETIME lpIdleTime
+		uintptr(unsafe.Pointer(Kernel)), // LPFILETIME lpKernelTime
+		uintptr(unsafe.Pointer(User)),   // LPFILETIME lpUserTime
+	)
+	if r1 == 0 {
+		if e1 == 0 {
+			return syscall.EINVAL
+		}
+		return e1
+	}
+	return nil
+}
 
 func NtQuerySystemInformation(SystemInformationClass uint32, SystemInformation *SYSTEM_PROCESS_INFORMATION,
 	SystemInformationLength uint32, ReturnLength *uint32) error {
@@ -393,35 +399,35 @@ func (b byLen) Less(i, j int) bool { return b[i].Len < b[j].Len }
 func (b byLen) Swap(i, j int)      { b[i], b[j] = b[j], b[i] }
 
 func main() {
-	t := time.Now()
-	infos, err := QuerySystemProcessInformation()
-	if err != nil {
-		Fatal(err)
-	}
-
-	var us []USTRING
-	for _, n := range infos {
-		s := n.ImageName.String()
-		u := USTRING{
-			Length:        n.ImageName.Length,
-			MaximumLength: n.ImageName.MaximumLength,
-			Buffer:        n.ImageName.Buffer,
-			String:        s,
-			Len:           len(s),
-		}
-		u.Len = len(u.String)
-		us = append(us, u)
-
-		// fmt.Printf("%q -- %d\n", s, len(s))
-	}
-	d := time.Since(t)
-
-	// if err := PrintJSON(infos); err != nil {
-	// 	Fatal(err)
+	// tick := time.NewTicker(time.Second * 5)
+	// for range tick.C {
+	// 	spi, err := QuerySystemProcessInformation()
+	// 	if err != nil {
+	// 		Fatal(err)
+	// 	}
+	// 	for _, n := range spi {
+	// 		fmt.Printf("%d - %s: %d\n", n.UniqueProcessId, n.ImageName, n.CycleTime)
+	// 	}
+	// 	// if err := PrintJSON(spi); err != nil {
+	// 	// 	Fatal(err)
+	// 	// }
 	// }
-	sort.Sort(byLen(us))
-	PrintJSON(us)
-	fmt.Println("Time:", d, d/time.Duration(len(infos)))
+
+	var m Monitor
+	tick := time.NewTicker(time.Second * 5)
+	for _ = range tick.C {
+		if err := m.updateProcs(); err != nil {
+			Fatal(err)
+		}
+		m.mu.Lock()
+		// if err := PrintJSON(m.procs); err != nil {
+		// 	Fatal(err)
+		// }
+		for _, p := range m.procs {
+			fmt.Printf("%s: %.2f\n", p.Name, p.CycleTime.load)
+		}
+		m.mu.Unlock()
+	}
 }
 
 func testEnumeProcesses() {
