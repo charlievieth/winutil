@@ -47,16 +47,16 @@ func GetSystemTimes(Idle, Kernel, User *windows.Filetime) error {
 	return nil
 }
 
-func NtQuerySystemInformation(SystemInformationClass uint32, SystemInformation *SYSTEM_PROCESS_INFORMATION,
+func NtQuerySystemInformation(SystemInformationClass uint32, SystemInformation uintptr,
 	SystemInformationLength uint32, ReturnLength *uint32) error {
 
 	const STATUS_SUCCESS = 0x00000000
 
 	r1, _, e1 := syscall.Syscall6(procNtQuerySystemInformation.Addr(), 4,
-		uintptr(SystemInformationClass),            // SYSTEM_INFORMATION_CLASS SystemInformationClass
-		uintptr(unsafe.Pointer(SystemInformation)), // PVOID                    SystemInformation
-		uintptr(SystemInformationLength),           // ULONG                    SystemInformationLength
-		uintptr(unsafe.Pointer(ReturnLength)),      // PULONG                   ReturnLength
+		uintptr(SystemInformationClass),       // SYSTEM_INFORMATION_CLASS SystemInformationClass
+		SystemInformation,                     // PVOID                    SystemInformation
+		uintptr(SystemInformationLength),      // ULONG                    SystemInformationLength
+		uintptr(unsafe.Pointer(ReturnLength)), // PULONG                   ReturnLength
 		0,
 		0,
 	)
@@ -66,6 +66,135 @@ func NtQuerySystemInformation(SystemInformationClass uint32, SystemInformation *
 		}
 		return e1
 	}
+	return nil
+}
+
+type SYSTEM_BASIC_INFORMATION struct {
+	Reserved                     uint32  // ULONG
+	TimerResolution              uint32  // ULONG
+	PageSize                     uint32  // ULONG
+	NumberOfPhysicalPages        uint32  // ULONG
+	LowestPhysicalPageNumber     uint32  // ULONG
+	HighestPhysicalPageNumber    uint32  // ULONG
+	AllocationGranularity        uint32  // ULONG
+	MinimumUserModeAddress       *uint32 // ULONG_PTR
+	MaximumUserModeAddress       *uint32 // ULONG_PTR
+	ActiveProcessorsAffinityMask *uint32 // ULONG_PTR
+	NumberOfProcessors           uint8   // CCHAR
+}
+
+func (s *SYSTEM_BASIC_INFORMATION) MarshalJSON() ([]byte, error) {
+	type expSYSTEM_BASIC_INFORMATION struct {
+		Reserved                     uint32
+		TimerResolution              uint32
+		PageSize                     uint32
+		NumberOfPhysicalPages        uint32
+		LowestPhysicalPageNumber     uint32
+		HighestPhysicalPageNumber    uint32
+		AllocationGranularity        uint32
+		MinimumUserModeAddress       string
+		MaximumUserModeAddress       string
+		ActiveProcessorsAffinityMask string
+		NumberOfProcessors           uint8
+	}
+	x := expSYSTEM_BASIC_INFORMATION{
+		Reserved:                     s.Reserved,
+		TimerResolution:              s.TimerResolution,
+		PageSize:                     s.PageSize,
+		NumberOfPhysicalPages:        s.NumberOfPhysicalPages,
+		LowestPhysicalPageNumber:     s.LowestPhysicalPageNumber,
+		HighestPhysicalPageNumber:    s.HighestPhysicalPageNumber,
+		AllocationGranularity:        s.AllocationGranularity,
+		MinimumUserModeAddress:       fmt.Sprintf("%p", s.MinimumUserModeAddress),
+		MaximumUserModeAddress:       fmt.Sprintf("%p", s.MaximumUserModeAddress),
+		ActiveProcessorsAffinityMask: fmt.Sprintf("%p", s.ActiveProcessorsAffinityMask),
+		NumberOfProcessors:           s.NumberOfProcessors,
+	}
+	return json.Marshal(x)
+}
+
+func QuerySystemBasicInformation() (*SYSTEM_BASIC_INFORMATION, error) {
+	var info SYSTEM_BASIC_INFORMATION
+	err := NtQuerySystemInformation(
+		SystemBasicInformation,
+		uintptr(unsafe.Pointer(&info)),
+		uint32(unsafe.Sizeof(SYSTEM_BASIC_INFORMATION{})),
+		nil,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &info, nil
+}
+
+// #define PhUpdateDelta(DltMgr, NewValue) \
+//     ((DltMgr)->Delta = (NewValue) - (DltMgr)->Value, \
+//     (DltMgr)->Value = (NewValue), (DltMgr)->Delta)
+
+type Uint64Delta struct {
+	Value uint64
+	Delta uint64
+}
+
+func (d *Uint64Delta) Update(u uint64) {
+	d.Delta = u - d.Value
+	d.Value = u
+}
+
+func UpdateSystemProcessorCycleTime(idle, system *Uint64Delta) error {
+	const SystemProcessorIdleCycleTimeInformation = 83
+	const SystemProcessorCycleTimeInformation = 108
+
+	var info SYSTEM_BASIC_INFORMATION
+	err := NtQuerySystemInformation(
+		SystemBasicInformation,
+		uintptr(unsafe.Pointer(&info)),
+		uint32(unsafe.Sizeof(SYSTEM_BASIC_INFORMATION{})),
+		nil,
+	)
+	if err != nil {
+		return err
+	}
+
+	numProcs := uint32(info.NumberOfProcessors)
+	length := uint32(unsafe.Sizeof(uint64(0))) * numProcs
+
+	idleCycles := make([]uint64, numProcs)
+
+	err = NtQuerySystemInformation(
+		SystemProcessorIdleCycleTimeInformation,
+		uintptr(unsafe.Pointer(&idleCycles[0])),
+		length,
+		nil,
+	)
+	if err != nil {
+		return err
+	}
+
+	var total uint64
+	for _, n := range idleCycles {
+		total += n
+	}
+	idle.Update(total)
+
+	sysCycles := make([]uint64, numProcs)
+
+	err = NtQuerySystemInformation(
+		SystemProcessorIdleCycleTimeInformation,
+		uintptr(unsafe.Pointer(&sysCycles[0])),
+		length,
+		nil,
+	)
+	if err != nil {
+		return err
+	}
+
+	total = 0
+	for _, n := range sysCycles {
+		total += n
+	}
+	system.Update(total)
+
 	return nil
 }
 
@@ -360,7 +489,8 @@ func QuerySystemProcessInformation() ([]SYSTEM_PROCESS_INFORMATION, error) {
 	for i := 0; n < max; i++ {
 		b := make([]byte, n)
 		p = (*SYSTEM_PROCESS_INFORMATION)(unsafe.Pointer(&b[0]))
-		err := NtQuerySystemInformation(SystemProcessInformation, p, n, &n)
+		v := uintptr(unsafe.Pointer(p))
+		err := NtQuerySystemInformation(SystemProcessInformation, v, n, &n)
 		if err == nil {
 			break
 		}
@@ -399,6 +529,21 @@ func (b byLen) Less(i, j int) bool { return b[i].Len < b[j].Len }
 func (b byLen) Swap(i, j int)      { b[i], b[j] = b[j], b[i] }
 
 func main() {
+	{
+		var idle Uint64Delta
+		var system Uint64Delta
+		if err := UpdateSystemProcessorCycleTime(&idle, &system); err != nil {
+			Fatal(err)
+		}
+		time.Sleep(time.Second)
+		if err := UpdateSystemProcessorCycleTime(&idle, &system); err != nil {
+			Fatal(err)
+		}
+		PrintJSON(idle)
+		PrintJSON(system)
+		return
+	}
+
 	// tick := time.NewTicker(time.Second * 5)
 	// for range tick.C {
 	// 	spi, err := QuerySystemProcessInformation()
