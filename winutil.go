@@ -218,59 +218,16 @@ func QuerySystemProcessorCycle(class, procHint uint32) (uint64, error) {
 }
 
 func UpdateSystemProcessorCycleTime(idle, system *Uint64Delta) error {
-	const SystemProcessorIdleCycleTimeInformation = 83
-	const SystemProcessorCycleTimeInformation = 108
-
-	var info SYSTEM_BASIC_INFORMATION
-	err := NtQuerySystemInformation(
-		SystemBasicInformation,
-		uintptr(unsafe.Pointer(&info)),
-		uint32(unsafe.Sizeof(SYSTEM_BASIC_INFORMATION{})),
-		nil,
-	)
+	in, err := QuerySystemProcessorCycle(SystemProcessorIdleCycleTimeInformation, 0)
 	if err != nil {
 		return err
 	}
-
-	numProcs := uint32(info.NumberOfProcessors)
-	length := uint32(unsafe.Sizeof(uint64(0))) * numProcs
-
-	idleCycles := make([]uint64, numProcs)
-
-	err = NtQuerySystemInformation(
-		SystemProcessorIdleCycleTimeInformation,
-		uintptr(unsafe.Pointer(&idleCycles[0])),
-		length,
-		nil,
-	)
+	idle.Update(in)
+	sn, err := QuerySystemProcessorCycle(SystemProcessorCycleTimeInformation, 0)
 	if err != nil {
 		return err
 	}
-
-	var total uint64
-	for _, n := range idleCycles {
-		total += n
-	}
-	idle.Update(total)
-
-	sysCycles := make([]uint64, numProcs)
-
-	err = NtQuerySystemInformation(
-		SystemProcessorIdleCycleTimeInformation,
-		uintptr(unsafe.Pointer(&sysCycles[0])),
-		length,
-		nil,
-	)
-	if err != nil {
-		return err
-	}
-
-	total = 0
-	for _, n := range sysCycles {
-		total += n
-	}
-	system.Update(total)
-
+	system.Update(sn)
 	return nil
 }
 
