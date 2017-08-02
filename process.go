@@ -16,29 +16,6 @@ type Tree struct {
 	Children []*Tree
 }
 
-const (
-	SystemBasicInformation                = 0
-	SystemPerformanceInformation          = 2
-	SystemTimeOfDayInformation            = 3
-	SystemProcessInformation              = 5
-	SystemProcessorPerformanceInformation = 8
-	SystemInterruptInformation            = 23
-	SystemExceptionInformation            = 33
-	SystemRegistryQuotaInformation        = 37
-	SystemLookasideInformation            = 45
-	SystemPolicyInformation               = 134
-)
-
-// Use: SystemProcessorPerformanceInformation
-type SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION struct {
-	IdleTime       int64  // LARGE_INTEGER
-	KernelTime     int64  // LARGE_INTEGER
-	UserTime       int64  // LARGE_INTEGER
-	DpcTime        int64  // LARGE_INTEGER
-	InterruptTime  int64  // LARGE_INTEGER
-	InterruptCount uint32 // ULONG
-}
-
 type KPRIORITY int32
 
 type UNICODE_STRING struct {
@@ -98,110 +75,11 @@ func (s SystemTime) MarshalJSON() ([]byte, error) {
 }
 
 type Monitor struct {
-	procs map[uint32]Process
-	mu    sync.Mutex
-	ord   uint64
+	procs     map[uint32]Process
+	mu        sync.Mutex
+	ord       uint64
+	cpuTotals SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION
 }
-
-/*
-func QuerySystemProcessInformation() ([]SYSTEM_PROCESS_INFORMATION, error) {
-	const max = 1024 * 1024 * 20
-
-	var p *SYSTEM_PROCESS_INFORMATION
-	n := uint32(1024 * 128)
-	for i := 0; n < max; i++ {
-		b := make([]byte, n)
-		p = (*SYSTEM_PROCESS_INFORMATION)(unsafe.Pointer(&b[0]))
-		err := NtQuerySystemInformation(SystemProcessInformation, p, n, &n)
-		if err == nil {
-			break
-		}
-		if n < uint32(len(b)) {
-			break
-		}
-		if i >= 10 {
-			return nil, fmt.Errorf("ERROR: i: %d n: %d err: %s", i, n, err)
-		}
-	}
-
-	var infos []SYSTEM_PROCESS_INFORMATION
-	for {
-		infos = append(infos, *p)
-		if p.NextEntryOffset == 0 {
-			break
-		}
-		p = (*SYSTEM_PROCESS_INFORMATION)(add(unsafe.Pointer(p), uintptr(p.NextEntryOffset)))
-	}
-
-	return infos, nil
-}
-*/
-
-/*
-func (m *Monitor) updateProcs() error {
-	const max = 1024 * 1024 * 100
-
-	var s *SYSTEM_PROCESS_INFORMATION
-	n := uint32(1024 * 128)
-	for i := 0; n < max; i++ {
-		b := make([]byte, n)
-		s = (*SYSTEM_PROCESS_INFORMATION)(unsafe.Pointer(&b[0]))
-		err := NtQuerySystemInformation(SystemProcessInformation, s, n, &n)
-		if err == nil {
-			break
-		}
-		if n < uint32(len(b)) {
-			break
-		}
-		if i >= 10 {
-			return err
-		}
-		if n > max {
-			return err
-		}
-	}
-
-	m.mu.Lock()
-	if m.procs == nil {
-		m.procs = make(map[uint32]Process, 256)
-	}
-	m.ord++
-	for i := 0; ; i++ {
-		pid := uint32(s.UniqueProcessId)
-		p, ok := m.procs[pid]
-		if !ok {
-			m.procs[pid] = Process{
-				Pid:        pid,
-				Parent:     uint32(s.InheritedFromUniqueProcessId),
-				Name:       s.ImageName.String(),
-				CreateTime: s.CreateTime,
-				UserTime:   SystemTime{curr: s.UserTime},
-				KernelTime: SystemTime{curr: s.KernelTime},
-				ord:        m.ord,
-			}
-		} else {
-			// p.UserTime.prev = p.UserTime.curr
-			p.UserTime.curr = s.UserTime
-			// p.KernelTime.prev = p.KernelTime.curr
-			p.KernelTime.curr = s.KernelTime
-			p.ord = m.ord
-			m.procs[pid] = p
-		}
-		if s.NextEntryOffset == 0 {
-			break
-		}
-		s = (*SYSTEM_PROCESS_INFORMATION)(add(unsafe.Pointer(s), uintptr(s.NextEntryOffset)))
-	}
-	for k, p := range m.procs {
-		if p.ord != m.ord {
-			delete(m.procs, k)
-		}
-	}
-	m.mu.Unlock()
-
-	return nil
-}
-*/
 
 // From: procprv.c:#2009
 //
@@ -350,6 +228,106 @@ type SYSTEM_THREAD_INFORMATION struct {
 	ThreadState     uint32       // ULONG
 	WaitReason      KWAIT_REASON // KWAIT_REASON
 }
+
+/*
+func QuerySystemProcessInformation() ([]SYSTEM_PROCESS_INFORMATION, error) {
+	const max = 1024 * 1024 * 20
+
+	var p *SYSTEM_PROCESS_INFORMATION
+	n := uint32(1024 * 128)
+	for i := 0; n < max; i++ {
+		b := make([]byte, n)
+		p = (*SYSTEM_PROCESS_INFORMATION)(unsafe.Pointer(&b[0]))
+		err := NtQuerySystemInformation(SystemProcessInformation, p, n, &n)
+		if err == nil {
+			break
+		}
+		if n < uint32(len(b)) {
+			break
+		}
+		if i >= 10 {
+			return nil, fmt.Errorf("ERROR: i: %d n: %d err: %s", i, n, err)
+		}
+	}
+
+	var infos []SYSTEM_PROCESS_INFORMATION
+	for {
+		infos = append(infos, *p)
+		if p.NextEntryOffset == 0 {
+			break
+		}
+		p = (*SYSTEM_PROCESS_INFORMATION)(add(unsafe.Pointer(p), uintptr(p.NextEntryOffset)))
+	}
+
+	return infos, nil
+}
+*/
+
+/*
+func (m *Monitor) updateProcs() error {
+	const max = 1024 * 1024 * 100
+
+	var s *SYSTEM_PROCESS_INFORMATION
+	n := uint32(1024 * 128)
+	for i := 0; n < max; i++ {
+		b := make([]byte, n)
+		s = (*SYSTEM_PROCESS_INFORMATION)(unsafe.Pointer(&b[0]))
+		err := NtQuerySystemInformation(SystemProcessInformation, s, n, &n)
+		if err == nil {
+			break
+		}
+		if n < uint32(len(b)) {
+			break
+		}
+		if i >= 10 {
+			return err
+		}
+		if n > max {
+			return err
+		}
+	}
+
+	m.mu.Lock()
+	if m.procs == nil {
+		m.procs = make(map[uint32]Process, 256)
+	}
+	m.ord++
+	for i := 0; ; i++ {
+		pid := uint32(s.UniqueProcessId)
+		p, ok := m.procs[pid]
+		if !ok {
+			m.procs[pid] = Process{
+				Pid:        pid,
+				Parent:     uint32(s.InheritedFromUniqueProcessId),
+				Name:       s.ImageName.String(),
+				CreateTime: s.CreateTime,
+				UserTime:   SystemTime{curr: s.UserTime},
+				KernelTime: SystemTime{curr: s.KernelTime},
+				ord:        m.ord,
+			}
+		} else {
+			// p.UserTime.prev = p.UserTime.curr
+			p.UserTime.curr = s.UserTime
+			// p.KernelTime.prev = p.KernelTime.curr
+			p.KernelTime.curr = s.KernelTime
+			p.ord = m.ord
+			m.procs[pid] = p
+		}
+		if s.NextEntryOffset == 0 {
+			break
+		}
+		s = (*SYSTEM_PROCESS_INFORMATION)(add(unsafe.Pointer(s), uintptr(s.NextEntryOffset)))
+	}
+	for k, p := range m.procs {
+		if p.ord != m.ord {
+			delete(m.procs, k)
+		}
+	}
+	m.mu.Unlock()
+
+	return nil
+}
+*/
 
 /*
 NTSTATUS WINAPI NtQuerySystemInformation(

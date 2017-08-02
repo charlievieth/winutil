@@ -47,6 +47,21 @@ func GetSystemTimes(Idle, Kernel, User *windows.Filetime) error {
 	return nil
 }
 
+const (
+	SystemBasicInformation                  = 0
+	SystemPerformanceInformation            = 2
+	SystemTimeOfDayInformation              = 3
+	SystemProcessInformation                = 5
+	SystemProcessorPerformanceInformation   = 8
+	SystemInterruptInformation              = 23
+	SystemExceptionInformation              = 33
+	SystemRegistryQuotaInformation          = 37
+	SystemLookasideInformation              = 45
+	SystemProcessorIdleCycleTimeInformation = 83
+	SystemProcessorCycleTimeInformation     = 108
+	SystemPolicyInformation                 = 134
+)
+
 func NtQuerySystemInformation(SystemInformationClass uint32, SystemInformation uintptr,
 	SystemInformationLength uint32, ReturnLength *uint32) error {
 
@@ -127,6 +142,21 @@ func QuerySystemBasicInformation() (*SYSTEM_BASIC_INFORMATION, error) {
 	return &info, nil
 }
 
+// Use: SystemProcessorPerformanceInformation
+type SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION struct {
+	IdleTime       int64  // LARGE_INTEGER
+	KernelTime     int64  // LARGE_INTEGER
+	UserTime       int64  // LARGE_INTEGER
+	DpcTime        int64  // LARGE_INTEGER
+	InterruptTime  int64  // LARGE_INTEGER
+	InterruptCount uint32 // ULONG
+}
+
+func QuerySystemProcessorPerformanceInformation(total *SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION) error {
+
+	return nil
+}
+
 // #define PhUpdateDelta(DltMgr, NewValue) \
 //     ((DltMgr)->Delta = (NewValue) - (DltMgr)->Value, \
 //     (DltMgr)->Value = (NewValue), (DltMgr)->Delta)
@@ -139,6 +169,52 @@ type Uint64Delta struct {
 func (d *Uint64Delta) Update(u uint64) {
 	d.Delta = u - d.Value
 	d.Value = u
+}
+
+func QuerySystemProcessorCycle(class, procHint uint32) (uint64, error) {
+	const Size = 8 // sizeof(uint64)
+
+	if class != SystemProcessorIdleCycleTimeInformation &&
+		class != SystemProcessorCycleTimeInformation {
+		return 0, fmt.Errorf("QuerySystemProcessorCycle: invalid SystemInformationClass: %d", class)
+	}
+
+	n := uint32(8) * Size
+	if 1 <= procHint && procHint <= 1024 {
+		n = procHint * Size
+	}
+	var scratch [64]uint64
+	var p []uint64
+	for {
+		if n <= uint32(len(scratch))*Size {
+			p = scratch[:]
+		} else {
+			p = make([]uint64, n/Size)
+		}
+		r1, _, e1 := syscall.Syscall6(procNtQuerySystemInformation.Addr(), 4,
+			uintptr(class),                 // SYSTEM_INFORMATION_CLASS SystemInformationClass
+			uintptr(unsafe.Pointer(&p[0])), // PVOID                    SystemInformation
+			uintptr(n),                     // ULONG                    SystemInformationLength
+			uintptr(unsafe.Pointer(&n)),    // PULONG                   ReturnLength
+			0,
+			0,
+		)
+		if r1 == 0 {
+			break
+		}
+		if e1 != 0 {
+			return 0, e1
+		}
+		if n < uint32(len(p))*Size {
+			return 0, errors.New("NtQuerySystemInformation: invalid return length")
+		}
+	}
+
+	var total uint64
+	for i := 0; i < int(n/Size); i++ {
+		total += p[i]
+	}
+	return total, nil
 }
 
 func UpdateSystemProcessorCycleTime(idle, system *Uint64Delta) error {
@@ -196,6 +272,65 @@ func UpdateSystemProcessorCycleTime(idle, system *Uint64Delta) error {
 	system.Update(total)
 
 	return nil
+}
+
+func CpuCycleUsageInformation(totalCycleTime, idleCycleTime uint64) float64 {
+	var (
+		PhCpuKernelUsage uint64
+		PhCpuUserUsage   uint64
+	)
+	_ = PhCpuKernelUsage
+	_ = PhCpuUserUsage
+
+	baseCpuUsage := 1 - float32(idleCycleTime)/float32(totalCycleTime)
+	_ = baseCpuUsage
+
+	return 0
+}
+
+func main() {
+	{
+		fmt.Println(QuerySystemProcessorCycle(SystemProcessorIdleCycleTimeInformation, 32))
+		fmt.Println(QuerySystemProcessorCycle(SystemProcessorCycleTimeInformation, 32))
+		return
+	}
+
+	var (
+		// idle   Uint64Delta
+		// system Uint64Delta
+		info SYSTEM_BASIC_INFORMATION
+	)
+
+	err := NtQuerySystemInformation(
+		SystemBasicInformation,
+		uintptr(unsafe.Pointer(&info)),
+		uint32(unsafe.Sizeof(SYSTEM_BASIC_INFORMATION{})),
+		nil,
+	)
+	if err != nil {
+		fmt.Printf("Error: %s  --  %#v\n", err, err)
+		Fatal(err)
+	}
+
+	numProcs := uint32(info.NumberOfProcessors) / 2
+	fmt.Println("numProcs:", numProcs)
+
+	length := uint32(unsafe.Sizeof(uint64(0))) * numProcs
+	fmt.Println("length:", length)
+
+	idleCycles := make([]uint64, numProcs)
+
+	err = NtQuerySystemInformation(
+		SystemProcessorIdleCycleTimeInformation,
+		uintptr(unsafe.Pointer(&idleCycles[0])),
+		length,
+		&length,
+	)
+	fmt.Println("length:", length)
+	if err != nil {
+		fmt.Printf("Error: %s  --  %#v\n", err, err)
+		Fatal(err)
+	}
 }
 
 func OpenProcess(pid int) (syscall.Handle, error) {
@@ -527,53 +662,6 @@ type byLen []USTRING
 func (b byLen) Len() int           { return len(b) }
 func (b byLen) Less(i, j int) bool { return b[i].Len < b[j].Len }
 func (b byLen) Swap(i, j int)      { b[i], b[j] = b[j], b[i] }
-
-func main() {
-	{
-		var idle Uint64Delta
-		var system Uint64Delta
-		if err := UpdateSystemProcessorCycleTime(&idle, &system); err != nil {
-			Fatal(err)
-		}
-		time.Sleep(time.Second)
-		if err := UpdateSystemProcessorCycleTime(&idle, &system); err != nil {
-			Fatal(err)
-		}
-		PrintJSON(idle)
-		PrintJSON(system)
-		return
-	}
-
-	// tick := time.NewTicker(time.Second * 5)
-	// for range tick.C {
-	// 	spi, err := QuerySystemProcessInformation()
-	// 	if err != nil {
-	// 		Fatal(err)
-	// 	}
-	// 	for _, n := range spi {
-	// 		fmt.Printf("%d - %s: %d\n", n.UniqueProcessId, n.ImageName, n.CycleTime)
-	// 	}
-	// 	// if err := PrintJSON(spi); err != nil {
-	// 	// 	Fatal(err)
-	// 	// }
-	// }
-
-	var m Monitor
-	tick := time.NewTicker(time.Second * 5)
-	for _ = range tick.C {
-		if err := m.updateProcs(); err != nil {
-			Fatal(err)
-		}
-		m.mu.Lock()
-		// if err := PrintJSON(m.procs); err != nil {
-		// 	Fatal(err)
-		// }
-		for _, p := range m.procs {
-			fmt.Printf("%s: %.2f\n", p.Name, p.CycleTime.load)
-		}
-		m.mu.Unlock()
-	}
-}
 
 func testEnumeProcesses() {
 
