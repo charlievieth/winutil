@@ -75,10 +75,11 @@ func (s SystemTime) MarshalJSON() ([]byte, error) {
 }
 
 type Monitor struct {
-	procs     map[uint32]Process
-	mu        sync.Mutex
-	ord       uint64
-	cpuTotals SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION
+	procs            map[uint32]Process
+	mu               sync.Mutex
+	ord              uint64
+	BasicInformation SYSTEM_BASIC_INFORMATION
+	cpuTotals        SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION
 }
 
 // From: procprv.c:#2009

@@ -142,21 +142,6 @@ func QuerySystemBasicInformation() (*SYSTEM_BASIC_INFORMATION, error) {
 	return &info, nil
 }
 
-// Use: SystemProcessorPerformanceInformation
-type SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION struct {
-	IdleTime       int64  // LARGE_INTEGER
-	KernelTime     int64  // LARGE_INTEGER
-	UserTime       int64  // LARGE_INTEGER
-	DpcTime        int64  // LARGE_INTEGER
-	InterruptTime  int64  // LARGE_INTEGER
-	InterruptCount uint32 // ULONG
-}
-
-func QuerySystemProcessorPerformanceInformation(total *SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION) error {
-
-	return nil
-}
-
 // #define PhUpdateDelta(DltMgr, NewValue) \
 //     ((DltMgr)->Delta = (NewValue) - (DltMgr)->Value, \
 //     (DltMgr)->Value = (NewValue), (DltMgr)->Delta)
@@ -217,6 +202,70 @@ func QuerySystemProcessorCycle(class, procHint uint32) (uint64, error) {
 	return total, nil
 }
 
+// TODO: Move
+func UpdateSystemProcessorPerformanceInformation(total *SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION, procHint int) error {
+	var scratch [16]SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION
+
+	n := len(scratch)
+	if 1 <= procHint && procHint <= 1024 {
+		n = procHint
+	}
+	var p []SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION
+	for {
+		if n <= len(scratch) {
+			p = scratch[:]
+		} else {
+			p = make([]SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION, n)
+		}
+		size := uintptr(n) * unsafe.Sizeof(p[0])
+		r1, _, e1 := syscall.Syscall6(procNtQuerySystemInformation.Addr(), 4,
+			SystemProcessorPerformanceInformation,
+			uintptr(unsafe.Pointer(&p[0])),
+			size,
+			uintptr(unsafe.Pointer(&size)),
+			0,
+			0,
+		)
+		if r1 == 0 {
+			break
+		}
+		if e1 != 0 {
+			return e1
+		}
+		n = int(size / unsafe.Sizeof(p[0]))
+		if n < len(p) {
+			return errors.New("NtQuerySystemInformation: invalid return length")
+		}
+	}
+
+	// zero
+	*total = SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION{}
+
+	for _, info := range p {
+		total.IdleTime += info.IdleTime
+		total.KernelTime += info.KernelTime
+		total.UserTime += info.UserTime
+		total.DpcTime += info.DpcTime
+		total.InterruptTime += info.InterruptTime
+		total.InterruptCount += info.InterruptCount
+	}
+
+	panic("IMPLEMENT REST OF FUNCTION!!!")
+
+	return nil
+}
+
+// TODO: Move
+// Use: SystemProcessorPerformanceInformation
+type SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION struct {
+	IdleTime       int64  // LARGE_INTEGER
+	KernelTime     int64  // LARGE_INTEGER
+	UserTime       int64  // LARGE_INTEGER
+	DpcTime        int64  // LARGE_INTEGER
+	InterruptTime  int64  // LARGE_INTEGER
+	InterruptCount uint32 // ULONG
+}
+
 func UpdateSystemProcessorCycleTime(idle, system *Uint64Delta) error {
 	in, err := QuerySystemProcessorCycle(SystemProcessorIdleCycleTimeInformation, 0)
 	if err != nil {
@@ -247,8 +296,15 @@ func CpuCycleUsageInformation(totalCycleTime, idleCycleTime uint64) float64 {
 
 func main() {
 	{
-		fmt.Println(QuerySystemProcessorCycle(SystemProcessorIdleCycleTimeInformation, 32))
-		fmt.Println(QuerySystemProcessorCycle(SystemProcessorCycleTimeInformation, 32))
+		var p SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION
+		err := UpdateSystemProcessorPerformanceInformation(&p, 8)
+		if err != nil {
+			fmt.Println("Error:", err)
+		}
+		if err := PrintJSON(p); err != nil {
+			Fatal(err)
+		}
+
 		return
 	}
 
